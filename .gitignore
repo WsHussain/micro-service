@@ -1,0 +1,23 @@
+# Dependencies
+/api_messages/vendor/
+/connector/vendor/
+/api_discussions/node_modules/
+
+# Environment files (never commit real credentials)
+.env
+*.env
+!.env.example
+
+# Local tooling
+/.tools/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Logs
+*.log
+npm-debug.log*

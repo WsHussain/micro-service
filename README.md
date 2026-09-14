@@ -4,165 +4,180 @@ Introduction aux micro-services — une messagerie découpée en **3 services** 
 
 | Service | Techno | Port | Rôle |
 |---|---|---|---|
-| `api_php` | PHP · Slim 4 · Eloquent · JWT | `8000` | Users + Messages (SQL) — connexion / inscription |
-| `api_express` | Node.js · Express · Mongoose | `5555` | Discussions (MongoDB, NoSQL) |
-| `connector` | PHP · Slim 4 · Guzzle | `8080` | Passerelle : relie les deux API, point d'entrée unique |
+| `api_messages` | PHP · Slim 4 · Eloquent · JWT | `8000` | Users + Messages (MySQL) — connexion / inscription |
+| `api_discussions` | Node.js · Express · Mongoose | `5555` | Discussions (MongoDB, NoSQL) |
+| `connector` | PHP · Slim 4 · Guzzle | `8080` | Passerelle : relie les deux API |
 
 ## Schéma de fonctionnement final
 
 ```
-                        ┌──────────────────────────┐
-   navigateur ────────► │   connector  :8080       │
-   Postman / curl       │   (Slim + Guzzle)        │
-   client web /client/  │   vérifie le JWT         │
-                        └─────┬──────────────┬─────┘
-                              │              │
-              /register /login│              │/discussions
-              /users /messages│              │/discussions/{id}
-                              ▼              ▼
-                ┌───────────────────┐   ┌────────────────────┐
-                │  api_php  :8000   │   │ api_express :5555  │
-                │  Slim + Eloquent  │   │ Express + Mongoose │
-                │  JWT (login)      │   │  (pas d'auth :     │
-                └─────────┬─────────┘   │  jamais exposée    │
-                          │             │  directement)      │
-                          ▼             └─────────┬──────────┘
-                   SQLite / MySQL                 ▼
-                  (users, messages)         MongoDB (discussions)
+        MySQL                                      MongoDB
+          │                                           │
+          ▼                                           ▼
+┌───────────────────┐                     ┌────────────────────┐
+│ api_messages :8000│                     │api_discussions :5555│
+│ Slim + Eloquent   │                     │ Express + Mongoose │
+│ JWT (login)       │                     │                    │
+└─────────┬─────────┘                     └──────────┬─────────┘
+          │                                          │
+          └──────────────┐            ┌──────────────┘
+                         ▼            ▼
+                  ┌────────────────────────┐
+                  │   connector  :8080     │
+                  │   (Slim + Guzzle)      │
+                  └────────────────────────┘
+                              ▲
+                              │
+                     Postman / curl
 ```
 
-Le lien entre les deux mondes : chaque message SQL peut porter un `discussion_id`
-(l'ObjectId Mongo d'une discussion). Le connecteur agrège les deux sur
-`GET /discussions/{id}/messages` → une discussion (Mongo) + ses messages (SQL)
-dans une seule réponse.
+Le lien entre les deux mondes : une discussion (MongoDB) stocke un tableau
+`messageIds` renvoyant vers les messages (MySQL). Le connecteur agrège les deux
+sur `GET /discussions/{id}` → la discussion + ses messages complets dans une
+seule réponse. Le contenu des messages reste la source de vérité côté MySQL.
 
 ## Prérequis
 
-- PHP ≥ 8.1 (testé avec XAMPP 8.2) + Composer
+- PHP ≥ 8.1 + Composer
 - Node.js ≥ 18 + npm
-- MongoDB lancé en local (service Windows ou `mongod`)
-- Aucun serveur SQL requis : la BDD PHP est en **SQLite** par défaut
-  (passer `DB_DRIVER=mysql` dans `api_php/.env` pour utiliser MySQL)
+- MySQL et MongoDB (ou `docker compose up -d`, voir ci-dessous)
 
 ## Installation
 
-```bash
-# 1) API PHP
-cd api_php
-composer install
-composer migrate          # crée users, messages, tests (SQLite)
+### 1) Les bases de données
 
-# 2) API Express
-cd ../api_express
+```bash
+docker compose up -d
+```
+
+Démarre MySQL sur `3306` (base `my_micro_services`, root/root) et MongoDB sur
+`27017`. Vous pouvez aussi utiliser vos installations locales — il suffit de
+faire correspondre les fichiers `.env`.
+
+### 2) api_messages (port 8000)
+
+```bash
+cd api_messages
+cp .env.example .env
+composer install
+php bin/migrate.php        # crée les tables users et messages
+php -S 127.0.0.1:8000 -t public
+```
+
+### 3) api_discussions (port 5555)
+
+```bash
+cd api_discussions
+cp .env.example .env
 npm install
-
-# 3) Connecteur
-cd ../connector
-composer install
+npm start
 ```
 
-Ou en une commande sous Windows : `install_all.bat`
-(utilise le PHP de XAMPP, modifiable en tête de script).
-
-> Les `.env` sont fournis avec un `JWT_SECRET` de dev **identique**
-> dans `api_php` et `connector` : c'est ce secret partagé qui permet
-> au connecteur de vérifier lui-même les tokens.
-
-## Démarrage
-
-`start_all.bat` ouvre les 3 serveurs, ou manuellement :
+### 4) connector (port 8080)
 
 ```bash
-cd api_php     && php -S localhost:8000 -t public   # API SQL
-cd api_express && node app.js                       # API NoSQL
-cd connector   && php -S localhost:8080 -t public   # Passerelle
+cd connector
+cp .env.example .env
+composer install
+php -S 127.0.0.1:8080 -t public
 ```
 
-- État global : http://localhost:8080/status
-- **Client web (bonus)** : http://localhost:8080/client/
+> Pensez à définir un `JWT_SECRET` dans `api_messages/.env` avant toute
+> utilisation réelle : la valeur d'exemple est un secret de développement.
 
 ## Les routes
 
-### connector :8080 — point d'entrée unique
+### api_messages :8000
+
+| Méthode | Route | Auth | Rôle |
+|---|---|---|---|
+| POST | `/register` | — | Inscription (renvoie l'user créé) |
+| POST | `/login` | — | Connexion — renvoie le **JWT** et l'user |
+| GET | `/users` | JWT | Liste des users |
+| GET · PUT · DELETE | `/users/{id}` | JWT | Lire / modifier / supprimer un user |
+| GET · POST | `/messages` | JWT | Lister ses messages / en créer un |
+| GET · PUT · DELETE | `/messages/{id}` | JWT | Lire / modifier / supprimer un message |
+
+Les routes protégées attendent le header `Authorization: Bearer <token>`.
+Un user ne peut modifier ou supprimer que son propre compte et ses propres
+messages (`403` sinon).
+
+### api_discussions :5555
+
+CRUD complet sur `/discussions` — champs : `title`, `participants` (ids des
+users PHP), `messageIds`.
+
+| Méthode | Route | Rôle |
+|---|---|---|
+| GET · POST | `/discussions` | Lister / créer une discussion |
+| GET · PUT · DELETE | `/discussions/{id}` | Lire / modifier / supprimer |
+| POST | `/discussions/{id}/messages` | Ajoute un `messageId` à la discussion |
+
+### connector :8080
 
 | Méthode | Route | Auth | Relayée vers |
 |---|---|---|---|
-| POST | `/register` | — | api_php |
-| POST | `/login` | — | api_php (renvoie le **JWT**) |
-| GET | `/me` | JWT | api_php |
-| GET/POST | `/users` · PUT/DELETE `/users/{id}` | JWT | api_php |
-| GET/POST | `/messages` · PUT/DELETE `/messages/{id}` | JWT | api_php |
-| GET/POST | `/discussions` · PUT/DELETE `/discussions/{id}` | JWT | api_express (`created_by` injecté depuis le token) |
-| GET | `/discussions/{id}/messages` | JWT | **agrégation** Express + PHP |
-| POST | `/discussions/{id}/messages` | JWT | crée le message (PHP) + ajoute l'expéditeur aux participants (Express) |
-| GET | `/status` | — | ping des deux API |
+| GET · POST | `/discussions` | — | api_discussions |
+| GET | `/discussions/{id}` | JWT | **agrégation** Mongo + MySQL |
+| POST | `/discussions/{id}/messages` | JWT | crée le message (api_messages) puis ajoute son id à la discussion (api_discussions) |
+| DELETE | `/discussions/{id}` | — | api_discussions |
 
-Les routes protégées attendent le header `Authorization: Bearer <token>`.
-
-### api_php :8000 (appelable aussi en direct)
-
-`GET /db-test` (query sur la table de test), `POST /register`, `POST /login`,
-`GET /me`, CRUD complet `/users` et `/messages` (JWT requis).
-
-`GET /messages?discussion_id=<oid>` filtre les messages d'une discussion.
-
-### api_express :5555 (interne, appelée par le connecteur)
-
-CRUD complet `/discussions` — champs : `title`, `description`,
-`participants` (ids des users PHP), `created_by`. Validations via
-`express-validator`.
+Le connecteur transmet le token reçu à `api_messages`, qui reste seul
+responsable de sa vérification.
 
 ## Exemple de session (curl / Postman)
 
 ```bash
-# Inscription -> renvoie un token
-curl -X POST http://localhost:8080/register -H "Content-Type: application/json" \
-     -d "{\"name\":\"Alice\",\"email\":\"alice@test.fr\",\"password\":\"secret123\"}"
+# Inscription puis connexion (directement sur api_messages)
+curl -X POST http://127.0.0.1:8000/register -H "Content-Type: application/json" \
+     -d '{"username":"alice","email":"alice@test.fr","password":"secret123"}'
 
-# Connexion
-curl -X POST http://localhost:8080/login -H "Content-Type: application/json" \
-     -d "{\"email\":\"alice@test.fr\",\"password\":\"secret123\"}"
-# -> {"message":"Connexion réussie.","user":{...},"token":"eyJ..."}
+curl -X POST http://127.0.0.1:8000/login -H "Content-Type: application/json" \
+     -d '{"email":"alice@test.fr","password":"secret123"}'
+# -> {"token":"eyJ...","user":{...}}
 
 TOKEN=eyJ...   # le token renvoyé
 
 # Créer une discussion (stockée dans MongoDB)
-curl -X POST http://localhost:8080/discussions -H "Authorization: Bearer $TOKEN" \
-     -H "Content-Type: application/json" -d "{\"title\":\"Projet\"}"
+curl -X POST http://127.0.0.1:8080/discussions -H "Content-Type: application/json" \
+     -d '{"title":"Projet","participants":[1]}'
 
-# Écrire dedans (message stocké en SQL, lié par discussion_id)
-curl -X POST http://localhost:8080/discussions/<oid>/messages \
+# Écrire dedans : message stocké en MySQL, son id ajouté à la discussion
+curl -X POST http://127.0.0.1:8080/discussions/<oid>/messages \
      -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-     -d "{\"content\":\"Premier message\"}"
+     -d '{"content":"Premier message"}'
 
-# Lire la discussion agrégée (Mongo + SQL)
-curl http://localhost:8080/discussions/<oid>/messages -H "Authorization: Bearer $TOKEN"
+# Lire la discussion agrégée (Mongo + MySQL)
+curl http://127.0.0.1:8080/discussions/<oid> -H "Authorization: Bearer $TOKEN"
 ```
+
+## Correspondance avec le sujet
+
+| Étape | Où |
+|---|---|
+| 1 — Slim + Eloquent, ajout de l'ORM à la Service Factory | `api_messages/src/Bootstrap/Database.php`, `public/index.php` |
+| 1 — `my_first_crud` (modèles User & Message + CRUD) | `api_messages/src/Models`, `src/Controllers`, `src/routes.php` |
+| 2 — inscription / connexion + JWT | `api_messages/src/Controllers/AuthController.php`, `src/Support/Jwt.php`, `src/Middleware/JwtAuthMiddleware.php` |
+| 3 — Express + Mongoose | `api_discussions/app.js`, `config/db.js` |
+| 4 — modèle Discussion + CRUD + validators | `api_discussions/models/`, `controllers/`, `routes/` |
+| 5 — connecteur reliant les 2 API | `connector/` |
 
 ## Sécurité
 
 - Mots de passe hachés en **bcrypt** (`password_hash`), jamais renvoyés en JSON.
-- Session **stateless** : JWT signé HS256 (`firebase/php-jwt` v7), expiration 24 h.
-- L'API Express n'a pas d'authentification : elle n'est jamais exposée au client,
-  le connecteur vérifie le JWT (secret partagé) avant de la solliciter.
-- Un user ne peut modifier/supprimer que son compte et ses propres messages
-  (403 sinon).
-
-## Bonus
-
-- **Messagerie graphique** : http://localhost:8080/client/ — client web
-  (HTML/JS vanilla, zéro dépendance) servi par le connecteur : inscription,
-  connexion, discussions, envoi/édition/suppression de messages, état des
-  services en temps réel dans l'en-tête.
+- Session **stateless** : JWT signé HS256 (`firebase/php-jwt` v7). Le token
+  porte `sub` (id user) et `exp` ; chaque route protégée le décode.
+- L'API Express n'a pas d'authentification : elle n'est pas destinée à être
+  exposée directement au client.
 
 ## Choix techniques
 
-- **Slim 4** + **PHP-DI** : le conteneur joue le rôle de Service Factory ;
-  Eloquent y est déclaré comme service `db` (`app/dependencies.php`).
-- **Eloquent** (illuminate/database) hors Laravel, avec la table de test
-  demandée par le sujet (`GET /db-test`).
-- **firebase/php-jwt ^7** : la branche 6.x est bloquée par un avis de
-  sécurité Packagist (PKSA-y2cr-5h3j-g3ys).
-- **SQLite par défaut** pour un rendu qui tourne sans configurer MySQL ;
-  bascule MySQL par simple variable d'environnement.
-# micro-service
+- **Slim 4** pour les deux services PHP ; Eloquent (`illuminate/database`) est
+  utilisé hors Laravel via le Capsule Manager.
+- Une discussion stocke `participants` et `messageIds` plutôt que le contenu
+  des messages : conformément au schéma du sujet, Messages/MySQL et
+  Discussions/MongoDB restent séparés et ne sont reliés que par le connecteur.
+- **firebase/php-jwt ^7** : la branche 6.x est bloquée par un avis de sécurité
+  Packagist (PKSA-y2cr-5h3j-g3ys).
+- Le connecteur n'a **aucune base de données** : il ne fait que dialoguer en
+  HTTP (Guzzle) avec les deux API.
